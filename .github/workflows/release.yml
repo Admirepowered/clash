@@ -31,8 +31,14 @@ jobs:
         run: make -j $(go run ./test/main.go) releases
 
       - name: Upload Release
-        uses: softprops/action-gh-release@v1
+        uses: ncipollo/release-action@v1.14.0
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: bin/*
-          draft: true
+          tag: github.ref
+          artifacts: |
+            bin/*
+          generateReleaseNotes: true
+          omitBodyDuringUpdate: true
+          allowUpdates: true
+          makeLatest: true
+          replacesArtifacts: true
