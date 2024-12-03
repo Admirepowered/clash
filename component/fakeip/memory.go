@@ -1,40 +1,37 @@
 package fakeip
 
 import (
-	"net"
+	"net/netip"
 
-	"github.com/Dreamacro/clash/common/cache"
+	"github.com/metacubex/mihomo/common/lru"
 )
 
 type memoryStore struct {
-	cache *cache.LruCache
+	cacheIP   *lru.LruCache[string, netip.Addr]
+	cacheHost *lru.LruCache[netip.Addr, string]
 }
 
 // GetByHost implements store.GetByHost
-func (m *memoryStore) GetByHost(host string) (net.IP, bool) {
-	if elm, exist := m.cache.Get(host); exist {
-		ip := elm.(net.IP)
-
+func (m *memoryStore) GetByHost(host string) (netip.Addr, bool) {
+	if ip, exist := m.cacheIP.Get(host); exist {
 		// ensure ip --> host on head of linked list
-		m.cache.Get(ipToUint(ip.To4()))
+		m.cacheHost.Get(ip)
 		return ip, true
 	}
 
-	return nil, false
+	return netip.Addr{}, false
 }
 
 // PutByHost implements store.PutByHost
-func (m *memoryStore) PutByHost(host string, ip net.IP) {
-	m.cache.Set(host, ip)
+func (m *memoryStore) PutByHost(host string, ip netip.Addr) {
+	m.cacheIP.Set(host, ip)
 }
 
 // GetByIP implements store.GetByIP
-func (m *memoryStore) GetByIP(ip net.IP) (string, bool) {
-	if elm, exist := m.cache.Get(ipToUint(ip.To4())); exist {
-		host := elm.(string)
-
+func (m *memoryStore) GetByIP(ip netip.Addr) (string, bool) {
+	if host, exist := m.cacheHost.Get(ip); exist {
 		// ensure host --> ip on head of linked list
-		m.cache.Get(host)
+		m.cacheIP.Get(host)
 		return host, true
 	}
 
@@ -42,28 +39,42 @@ func (m *memoryStore) GetByIP(ip net.IP) (string, bool) {
 }
 
 // PutByIP implements store.PutByIP
-func (m *memoryStore) PutByIP(ip net.IP, host string) {
-	m.cache.Set(ipToUint(ip.To4()), host)
+func (m *memoryStore) PutByIP(ip netip.Addr, host string) {
+	m.cacheHost.Set(ip, host)
 }
 
 // DelByIP implements store.DelByIP
-func (m *memoryStore) DelByIP(ip net.IP) {
-	ipNum := ipToUint(ip.To4())
-	if elm, exist := m.cache.Get(ipNum); exist {
-		m.cache.Delete(elm.(string))
+func (m *memoryStore) DelByIP(ip netip.Addr) {
+	if host, exist := m.cacheHost.Get(ip); exist {
+		m.cacheIP.Delete(host)
 	}
-	m.cache.Delete(ipNum)
+	m.cacheHost.Delete(ip)
 }
 
 // Exist implements store.Exist
-func (m *memoryStore) Exist(ip net.IP) bool {
-	return m.cache.Exist(ipToUint(ip.To4()))
+func (m *memoryStore) Exist(ip netip.Addr) bool {
+	return m.cacheHost.Exist(ip)
 }
 
 // CloneTo implements store.CloneTo
 // only for memoryStore to memoryStore
 func (m *memoryStore) CloneTo(store store) {
 	if ms, ok := store.(*memoryStore); ok {
-		m.cache.CloneTo(ms.cache)
+		m.cacheIP.CloneTo(ms.cacheIP)
+		m.cacheHost.CloneTo(ms.cacheHost)
+	}
+}
+
+// FlushFakeIP implements store.FlushFakeIP
+func (m *memoryStore) FlushFakeIP() error {
+	m.cacheIP.Clear()
+	m.cacheHost.Clear()
+	return nil
+}
+
+func newMemoryStore(size int) *memoryStore {
+	return &memoryStore{
+		cacheIP:   lru.New[string, netip.Addr](lru.WithSize[string, netip.Addr](size)),
+		cacheHost: lru.New[netip.Addr, string](lru.WithSize[netip.Addr, string](size)),
 	}
 }

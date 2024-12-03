@@ -3,15 +3,17 @@ package iface
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"time"
 
-	"github.com/Dreamacro/clash/common/singledo"
+	"github.com/metacubex/mihomo/common/singledo"
 )
 
 type Interface struct {
 	Index        int
+	MTU          int
 	Name         string
-	Addrs        []*net.IPNet
+	Addresses    []netip.Prefix
 	HardwareAddr net.HardwareAddr
 }
 
@@ -20,10 +22,10 @@ var (
 	ErrAddrNotFound  = errors.New("addr not found")
 )
 
-var interfaces = singledo.NewSingle(time.Second * 20)
+var interfaces = singledo.NewSingle[map[string]*Interface](time.Second * 20)
 
-func ResolveInterface(name string) (*Interface, error) {
-	value, err, _ := interfaces.Do(func() (any, error) {
+func Interfaces() (map[string]*Interface, error) {
+	value, err, _ := interfaces.Do(func() (map[string]*Interface, error) {
 		ifaces, err := net.Interfaces()
 		if err != nil {
 			return nil, err
@@ -37,31 +39,47 @@ func ResolveInterface(name string) (*Interface, error) {
 				continue
 			}
 
-			ipNets := make([]*net.IPNet, 0, len(addrs))
+			ipNets := make([]netip.Prefix, 0, len(addrs))
 			for _, addr := range addrs {
-				ipNet := addr.(*net.IPNet)
-				if v4 := ipNet.IP.To4(); v4 != nil {
-					ipNet.IP = v4
+				var pf netip.Prefix
+				switch ipNet := addr.(type) {
+				case *net.IPNet:
+					ip, _ := netip.AddrFromSlice(ipNet.IP)
+					ones, bits := ipNet.Mask.Size()
+					if bits == 32 {
+						ip = ip.Unmap()
+					}
+					pf = netip.PrefixFrom(ip, ones)
+				case *net.IPAddr:
+					ip, _ := netip.AddrFromSlice(ipNet.IP)
+					ip = ip.Unmap()
+					pf = netip.PrefixFrom(ip, ip.BitLen())
 				}
-
-				ipNets = append(ipNets, ipNet)
+				if pf.IsValid() {
+					ipNets = append(ipNets, pf)
+				}
 			}
 
 			r[iface.Name] = &Interface{
 				Index:        iface.Index,
+				MTU:          iface.MTU,
 				Name:         iface.Name,
-				Addrs:        ipNets,
+				Addresses:    ipNets,
 				HardwareAddr: iface.HardwareAddr,
 			}
 		}
 
 		return r, nil
 	})
+	return value, err
+}
+
+func ResolveInterface(name string) (*Interface, error) {
+	ifaces, err := Interfaces()
 	if err != nil {
 		return nil, err
 	}
 
-	ifaces := value.(map[string]*Interface)
 	iface, ok := ifaces[name]
 	if !ok {
 		return nil, ErrIfaceNotFound
@@ -70,45 +88,60 @@ func ResolveInterface(name string) (*Interface, error) {
 	return iface, nil
 }
 
+func IsLocalIp(ip netip.Addr) (bool, error) {
+	ifaces, err := Interfaces()
+	if err != nil {
+		return false, err
+	}
+	for _, iface := range ifaces {
+		for _, addr := range iface.Addresses {
+			if addr.Contains(ip) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 func FlushCache() {
 	interfaces.Reset()
 }
 
-func (iface *Interface) PickIPv4Addr(destination net.IP) (*net.IPNet, error) {
-	return iface.pickIPAddr(destination, func(addr *net.IPNet) bool {
-		return addr.IP.To4() != nil
+func (iface *Interface) PickIPv4Addr(destination netip.Addr) (netip.Prefix, error) {
+	return iface.pickIPAddr(destination, func(addr netip.Prefix) bool {
+		return addr.Addr().Is4()
 	})
 }
 
-func (iface *Interface) PickIPv6Addr(destination net.IP) (*net.IPNet, error) {
-	return iface.pickIPAddr(destination, func(addr *net.IPNet) bool {
-		return addr.IP.To4() == nil
+func (iface *Interface) PickIPv6Addr(destination netip.Addr) (netip.Prefix, error) {
+	return iface.pickIPAddr(destination, func(addr netip.Prefix) bool {
+		return addr.Addr().Is6()
 	})
 }
 
-func (iface *Interface) pickIPAddr(destination net.IP, accept func(addr *net.IPNet) bool) (*net.IPNet, error) {
-	var fallback *net.IPNet
+func (iface *Interface) pickIPAddr(destination netip.Addr, accept func(addr netip.Prefix) bool) (netip.Prefix, error) {
+	var fallback netip.Prefix
 
-	for _, addr := range iface.Addrs {
+	for _, addr := range iface.Addresses {
 		if !accept(addr) {
 			continue
 		}
 
-		if fallback == nil && !addr.IP.IsLinkLocalUnicast() {
+		if !fallback.IsValid() && !addr.Addr().IsLinkLocalUnicast() {
 			fallback = addr
 
-			if destination == nil {
+			if !destination.IsValid() {
 				break
 			}
 		}
 
-		if destination != nil && addr.Contains(destination) {
+		if destination.IsValid() && addr.Contains(destination) {
 			return addr, nil
 		}
 	}
 
-	if fallback == nil {
-		return nil, ErrAddrNotFound
+	if !fallback.IsValid() {
+		return netip.Prefix{}, ErrAddrNotFound
 	}
 
 	return fallback, nil

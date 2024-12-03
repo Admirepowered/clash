@@ -1,26 +1,17 @@
 linters:
   disable-all: true
   enable:
-    - gci
     - gofumpt
-    - gosimple
-    - govet
-    - ineffassign
-    - misspell
     - staticcheck
-    - unconvert
-    - unused
-    - usestdlibvars
-    - exhaustive
+    - govet
+    - gci
 
 linters-settings:
   gci:
     custom-order: true
     sections:
       - standard
-      - prefix(github.com/Dreamacro/clash)
+      - prefix(github.com/metacubex/mihomo)
       - default
   staticcheck:
-    go: '1.21'
-  exhaustive:
-    default-signifies-exhaustive: true
+    go: '1.19'

@@ -4,10 +4,10 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	"github.com/Dreamacro/clash/common/pool"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/socks5"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/common/pool"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/socks5"
 )
 
 type UDPListener struct {
@@ -32,7 +32,13 @@ func (l *UDPListener) Close() error {
 	return l.packetConn.Close()
 }
 
-func NewUDP(addr string, in chan<- *inbound.PacketAdapter) (C.Listener, error) {
+func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	if len(additions) == 0 {
+		additions = []inbound.Addition{
+			inbound.WithInName("DEFAULT-TPROXY"),
+			inbound.WithSpecialRules(""),
+		}
+	}
 	l, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return nil, err
@@ -73,25 +79,27 @@ func NewUDP(addr string, in chan<- *inbound.PacketAdapter) (C.Listener, error) {
 				continue
 			}
 
+			dscp, _ := getDSCP(oob[:oobn])
+			additions = append(additions, inbound.WithDSCP(dscp))
+
 			if rAddr.Addr().Is4() {
 				// try to unmap 4in6 address
 				lAddr = netip.AddrPortFrom(lAddr.Addr().Unmap(), lAddr.Port())
 			}
-			handlePacketConn(in, buf[:n], lAddr, rAddr)
+			handlePacketConn(l, tunnel, buf[:n], lAddr, rAddr, additions...)
 		}
 	}()
 
 	return rl, nil
 }
 
-func handlePacketConn(in chan<- *inbound.PacketAdapter, buf []byte, lAddr, rAddr netip.AddrPort) {
+func handlePacketConn(pc net.PacketConn, tunnel C.Tunnel, buf []byte, lAddr, rAddr netip.AddrPort, additions ...inbound.Addition) {
 	target := socks5.AddrFromStdAddrPort(rAddr)
 	pkt := &packet{
-		lAddr: lAddr,
-		buf:   buf,
+		pc:     pc,
+		lAddr:  lAddr,
+		buf:    buf,
+		tunnel: tunnel,
 	}
-	select {
-	case in <- inbound.NewPacket(target, target.UDPAddr(), pkt, C.TPROXY):
-	default:
-	}
+	tunnel.HandleUDPPacket(inbound.NewPacket(target, pkt, C.TPROXY, additions...))
 }

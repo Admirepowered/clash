@@ -1,16 +1,18 @@
 package fakeip
 
 import (
-	"net"
+	"fmt"
+	"net/netip"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/Dreamacro/clash/component/profile/cachefile"
-	"github.com/Dreamacro/clash/component/trie"
+	"github.com/metacubex/mihomo/component/profile/cachefile"
+	"github.com/metacubex/mihomo/component/trie"
+	C "github.com/metacubex/mihomo/constant"
 
+	"github.com/metacubex/bbolt"
 	"github.com/stretchr/testify/assert"
-	"go.etcd.io/bbolt"
 )
 
 func createPools(options Options) ([]*Pool, string, error) {
@@ -31,7 +33,7 @@ func createCachefileStore(options Options) (*Pool, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	f, err := os.CreateTemp("", "clash")
+	f, err := os.CreateTemp("", "mihomo")
 	if err != nil {
 		return nil, "", err
 	}
@@ -41,14 +43,12 @@ func createCachefileStore(options Options) (*Pool, string, error) {
 		return nil, "", err
 	}
 
-	pool.store = &cachefileStore{
-		cache: &cachefile.CacheFile{DB: db},
-	}
+	pool.store = newCachefileStore(&cachefile.CacheFile{DB: db})
 	return pool, f.Name(), nil
 }
 
 func TestPool_Basic(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/29")
+	ipnet := netip.MustParsePrefix("192.168.0.0/28")
 	pools, tempfile, err := createPools(Options{
 		IPNet: ipnet,
 		Size:  10,
@@ -61,21 +61,50 @@ func TestPool_Basic(t *testing.T) {
 		last := pool.Lookup("bar.com")
 		bar, exist := pool.LookBack(last)
 
-		assert.True(t, first.Equal(net.IP{192, 168, 0, 2}))
-		assert.Equal(t, pool.Lookup("foo.com"), net.IP{192, 168, 0, 2})
-		assert.True(t, last.Equal(net.IP{192, 168, 0, 3}))
+		assert.Equal(t, first, netip.AddrFrom4([4]byte{192, 168, 0, 4}))
+		assert.Equal(t, pool.Lookup("foo.com"), netip.AddrFrom4([4]byte{192, 168, 0, 4}))
+		assert.Equal(t, last, netip.AddrFrom4([4]byte{192, 168, 0, 5}))
 		assert.True(t, exist)
 		assert.Equal(t, bar, "bar.com")
-		assert.Equal(t, pool.Gateway(), net.IP{192, 168, 0, 1})
+		assert.Equal(t, pool.Gateway(), netip.AddrFrom4([4]byte{192, 168, 0, 1}))
+		assert.Equal(t, pool.Broadcast(), netip.AddrFrom4([4]byte{192, 168, 0, 15}))
 		assert.Equal(t, pool.IPNet().String(), ipnet.String())
-		assert.True(t, pool.Exist(net.IP{192, 168, 0, 3}))
-		assert.False(t, pool.Exist(net.IP{192, 168, 0, 4}))
-		assert.False(t, pool.Exist(net.ParseIP("::1")))
+		assert.True(t, pool.Exist(netip.AddrFrom4([4]byte{192, 168, 0, 5})))
+		assert.False(t, pool.Exist(netip.AddrFrom4([4]byte{192, 168, 0, 6})))
+		assert.False(t, pool.Exist(netip.MustParseAddr("::1")))
+	}
+}
+
+func TestPool_BasicV6(t *testing.T) {
+	ipnet := netip.MustParsePrefix("2001:4860:4860::8888/118")
+	pools, tempfile, err := createPools(Options{
+		IPNet: ipnet,
+		Size:  10,
+	})
+	assert.Nil(t, err)
+	defer os.Remove(tempfile)
+
+	for _, pool := range pools {
+		first := pool.Lookup("foo.com")
+		last := pool.Lookup("bar.com")
+		bar, exist := pool.LookBack(last)
+
+		assert.Equal(t, first, netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8804"))
+		assert.Equal(t, pool.Lookup("foo.com"), netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8804"))
+		assert.Equal(t, last, netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8805"))
+		assert.True(t, exist)
+		assert.Equal(t, bar, "bar.com")
+		assert.Equal(t, pool.Gateway(), netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8801"))
+		assert.Equal(t, pool.Broadcast(), netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8bff"))
+		assert.Equal(t, pool.IPNet().String(), ipnet.String())
+		assert.True(t, pool.Exist(netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8805")))
+		assert.False(t, pool.Exist(netip.MustParseAddr("2001:4860:4860:0000:0000:0000:0000:8806")))
+		assert.False(t, pool.Exist(netip.MustParseAddr("127.0.0.1")))
 	}
 }
 
 func TestPool_Case_Insensitive(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/29")
+	ipnet := netip.MustParsePrefix("192.168.0.1/29")
 	pools, tempfile, err := createPools(Options{
 		IPNet: ipnet,
 		Size:  10,
@@ -88,7 +117,7 @@ func TestPool_Case_Insensitive(t *testing.T) {
 		last := pool.Lookup("Foo.Com")
 		foo, exist := pool.LookBack(last)
 
-		assert.True(t, first.Equal(pool.Lookup("Foo.Com")))
+		assert.Equal(t, first, pool.Lookup("Foo.Com"))
 		assert.Equal(t, pool.Lookup("fOo.cOM"), first)
 		assert.True(t, exist)
 		assert.Equal(t, foo, "foo.com")
@@ -96,7 +125,7 @@ func TestPool_Case_Insensitive(t *testing.T) {
 }
 
 func TestPool_CycleUsed(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/29")
+	ipnet := netip.MustParsePrefix("192.168.0.16/28")
 	pools, tempfile, err := createPools(Options{
 		IPNet: ipnet,
 		Size:  10,
@@ -105,24 +134,27 @@ func TestPool_CycleUsed(t *testing.T) {
 	defer os.Remove(tempfile)
 
 	for _, pool := range pools {
-		assert.Equal(t, net.IP{192, 168, 0, 2}, pool.Lookup("2.com"))
-		assert.Equal(t, net.IP{192, 168, 0, 3}, pool.Lookup("3.com"))
-		assert.Equal(t, net.IP{192, 168, 0, 4}, pool.Lookup("4.com"))
-		assert.Equal(t, net.IP{192, 168, 0, 5}, pool.Lookup("5.com"))
-		assert.Equal(t, net.IP{192, 168, 0, 6}, pool.Lookup("6.com"))
-		assert.Equal(t, net.IP{192, 168, 0, 2}, pool.Lookup("12.com"))
-		assert.Equal(t, net.IP{192, 168, 0, 3}, pool.Lookup("3.com"))
+		foo := pool.Lookup("foo.com")
+		bar := pool.Lookup("bar.com")
+		for i := 0; i < 9; i++ {
+			pool.Lookup(fmt.Sprintf("%d.com", i))
+		}
+		baz := pool.Lookup("baz.com")
+		next := pool.Lookup("foo.com")
+		assert.Equal(t, foo, baz)
+		assert.Equal(t, next, bar)
 	}
 }
 
 func TestPool_Skip(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/30")
-	tree := trie.New()
-	tree.Insert("example.com", tree)
+	ipnet := netip.MustParsePrefix("192.168.0.1/29")
+	tree := trie.New[struct{}]()
+	assert.NoError(t, tree.Insert("example.com", struct{}{}))
+	assert.False(t, tree.IsEmpty())
 	pools, tempfile, err := createPools(Options{
 		IPNet: ipnet,
 		Size:  10,
-		Host:  tree,
+		Host:  []C.DomainMatcher{tree.NewDomainSet()},
 	})
 	assert.Nil(t, err)
 	defer os.Remove(tempfile)
@@ -130,11 +162,33 @@ func TestPool_Skip(t *testing.T) {
 	for _, pool := range pools {
 		assert.True(t, pool.ShouldSkipped("example.com"))
 		assert.False(t, pool.ShouldSkipped("foo.com"))
+		assert.False(t, pool.shouldSkipped("baz.com"))
+	}
+}
+
+func TestPool_SkipWhiteList(t *testing.T) {
+	ipnet := netip.MustParsePrefix("192.168.0.1/29")
+	tree := trie.New[struct{}]()
+	assert.NoError(t, tree.Insert("example.com", struct{}{}))
+	assert.False(t, tree.IsEmpty())
+	pools, tempfile, err := createPools(Options{
+		IPNet: ipnet,
+		Size:  10,
+		Host:  []C.DomainMatcher{tree.NewDomainSet()},
+		Mode:  C.FilterWhiteList,
+	})
+	assert.Nil(t, err)
+	defer os.Remove(tempfile)
+
+	for _, pool := range pools {
+		assert.False(t, pool.ShouldSkipped("example.com"))
+		assert.True(t, pool.ShouldSkipped("foo.com"))
+		assert.True(t, pool.ShouldSkipped("baz.com"))
 	}
 }
 
 func TestPool_MaxCacheSize(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/24")
+	ipnet := netip.MustParsePrefix("192.168.0.1/24")
 	pool, _ := New(Options{
 		IPNet: ipnet,
 		Size:  2,
@@ -145,11 +199,11 @@ func TestPool_MaxCacheSize(t *testing.T) {
 	pool.Lookup("baz.com")
 	next := pool.Lookup("foo.com")
 
-	assert.False(t, first.Equal(next))
+	assert.NotEqual(t, first, next)
 }
 
 func TestPool_DoubleMapping(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/24")
+	ipnet := netip.MustParsePrefix("192.168.0.1/24")
 	pool, _ := New(Options{
 		IPNet: ipnet,
 		Size:  2,
@@ -175,11 +229,11 @@ func TestPool_DoubleMapping(t *testing.T) {
 	assert.False(t, bazExist)
 	assert.True(t, barExist)
 
-	assert.False(t, bazIP.Equal(newBazIP))
+	assert.NotEqual(t, bazIP, newBazIP)
 }
 
 func TestPool_Clone(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/24")
+	ipnet := netip.MustParsePrefix("192.168.0.1/24")
 	pool, _ := New(Options{
 		IPNet: ipnet,
 		Size:  2,
@@ -187,8 +241,8 @@ func TestPool_Clone(t *testing.T) {
 
 	first := pool.Lookup("foo.com")
 	last := pool.Lookup("bar.com")
-	assert.True(t, first.Equal(net.IP{192, 168, 0, 2}))
-	assert.True(t, last.Equal(net.IP{192, 168, 0, 3}))
+	assert.Equal(t, first, netip.AddrFrom4([4]byte{192, 168, 0, 4}))
+	assert.Equal(t, last, netip.AddrFrom4([4]byte{192, 168, 0, 5}))
 
 	newPool, _ := New(Options{
 		IPNet: ipnet,
@@ -202,11 +256,71 @@ func TestPool_Clone(t *testing.T) {
 }
 
 func TestPool_Error(t *testing.T) {
-	_, ipnet, _ := net.ParseCIDR("192.168.0.1/31")
+	ipnet := netip.MustParsePrefix("192.168.0.1/31")
 	_, err := New(Options{
 		IPNet: ipnet,
 		Size:  10,
 	})
 
 	assert.Error(t, err)
+}
+
+func TestPool_FlushFileCache(t *testing.T) {
+	ipnet := netip.MustParsePrefix("192.168.0.1/28")
+	pools, tempfile, err := createPools(Options{
+		IPNet: ipnet,
+		Size:  10,
+	})
+	assert.Nil(t, err)
+	defer os.Remove(tempfile)
+
+	for _, pool := range pools {
+		foo := pool.Lookup("foo.com")
+		bar := pool.Lookup("baz.com")
+		bax := pool.Lookup("baz.com")
+		fox := pool.Lookup("foo.com")
+
+		err = pool.FlushFakeIP()
+		assert.Nil(t, err)
+
+		next := pool.Lookup("baz.com")
+		baz := pool.Lookup("foo.com")
+		nero := pool.Lookup("foo.com")
+
+		assert.Equal(t, foo, fox)
+		assert.Equal(t, foo, next)
+		assert.NotEqual(t, foo, baz)
+		assert.Equal(t, bar, bax)
+		assert.Equal(t, bar, baz)
+		assert.NotEqual(t, bar, next)
+		assert.Equal(t, baz, nero)
+	}
+}
+
+func TestPool_FlushMemoryCache(t *testing.T) {
+	ipnet := netip.MustParsePrefix("192.168.0.1/28")
+	pool, _ := New(Options{
+		IPNet: ipnet,
+		Size:  10,
+	})
+
+	foo := pool.Lookup("foo.com")
+	bar := pool.Lookup("baz.com")
+	bax := pool.Lookup("baz.com")
+	fox := pool.Lookup("foo.com")
+
+	err := pool.FlushFakeIP()
+	assert.Nil(t, err)
+
+	next := pool.Lookup("baz.com")
+	baz := pool.Lookup("foo.com")
+	nero := pool.Lookup("foo.com")
+
+	assert.Equal(t, foo, fox)
+	assert.Equal(t, foo, next)
+	assert.NotEqual(t, foo, baz)
+	assert.Equal(t, bar, bax)
+	assert.Equal(t, bar, baz)
+	assert.NotEqual(t, bar, next)
+	assert.Equal(t, baz, nero)
 }

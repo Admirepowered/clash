@@ -7,8 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Dreamacro/clash/transport/shadowsocks/shadowaead"
-	"github.com/Dreamacro/clash/transport/shadowsocks/shadowstream"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/transport/shadowsocks/shadowaead"
+	"github.com/metacubex/mihomo/transport/shadowsocks/shadowstream"
 )
 
 type Cipher interface {
@@ -21,7 +22,7 @@ type StreamConnCipher interface {
 }
 
 type PacketConnCipher interface {
-	PacketConn(net.PacketConn) net.PacketConn
+	PacketConn(N.EnhancePacketConn) N.EnhancePacketConn
 }
 
 // ErrCipherNotSupported occurs when a cipher is not supported (likely because of security concerns).
@@ -33,6 +34,11 @@ const (
 	aeadAes256Gcm         = "AEAD_AES_256_GCM"
 	aeadChacha20Poly1305  = "AEAD_CHACHA20_POLY1305"
 	aeadXChacha20Poly1305 = "AEAD_XCHACHA20_POLY1305"
+	aeadChacha8Poly1305   = "AEAD_CHACHA8_POLY1305"
+	aeadXChacha8Poly1305  = "AEAD_XCHACHA8_POLY1305"
+	aeadAes128Ccm         = "AEAD_AES_128_CCM"
+	aeadAes192Ccm         = "AEAD_AES_192_CCM"
+	aeadAes256Ccm         = "AEAD_AES_256_CCM"
 )
 
 // List of AEAD ciphers: key size in bytes and constructor
@@ -45,6 +51,11 @@ var aeadList = map[string]struct {
 	aeadAes256Gcm:         {32, shadowaead.AESGCM},
 	aeadChacha20Poly1305:  {32, shadowaead.Chacha20Poly1305},
 	aeadXChacha20Poly1305: {32, shadowaead.XChacha20Poly1305},
+	aeadChacha8Poly1305:   {32, shadowaead.Chacha8Poly1305},
+	aeadXChacha8Poly1305:  {32, shadowaead.XChacha8Poly1305},
+	aeadAes128Ccm:         {16, shadowaead.AESCCM},
+	aeadAes192Ccm:         {24, shadowaead.AESCCM},
+	aeadAes256Ccm:         {32, shadowaead.AESCCM},
 }
 
 // List of stream ciphers: key size in bytes and constructor
@@ -59,6 +70,7 @@ var streamList = map[string]struct {
 	"AES-128-CFB":   {16, shadowstream.AESCFB},
 	"AES-192-CFB":   {24, shadowstream.AESCFB},
 	"AES-256-CFB":   {32, shadowstream.AESCFB},
+	"CHACHA20":      {32, shadowstream.ChaCha20},
 	"CHACHA20-IETF": {32, shadowstream.Chacha20IETF},
 	"XCHACHA20":     {32, shadowstream.Xchacha20},
 }
@@ -93,6 +105,16 @@ func PickCipher(name string, key []byte, password string) (Cipher, error) {
 		name = aeadAes192Gcm
 	case "AES-256-GCM":
 		name = aeadAes256Gcm
+	case "CHACHA8-IETF-POLY1305":
+		name = aeadChacha8Poly1305
+	case "XCHACHA8-IETF-POLY1305":
+		name = aeadXChacha8Poly1305
+	case "AES-128-CCM":
+		name = aeadAes128Ccm
+	case "AES-192-CCM":
+		name = aeadAes192Ccm
+	case "AES-256-CCM":
+		name = aeadAes256Ccm
 	}
 
 	if choice, ok := aeadList[name]; ok {
@@ -127,7 +149,7 @@ type AeadCipher struct {
 }
 
 func (aead *AeadCipher) StreamConn(c net.Conn) net.Conn { return shadowaead.NewConn(c, aead) }
-func (aead *AeadCipher) PacketConn(c net.PacketConn) net.PacketConn {
+func (aead *AeadCipher) PacketConn(c N.EnhancePacketConn) N.EnhancePacketConn {
 	return shadowaead.NewPacketConn(c, aead)
 }
 
@@ -138,7 +160,7 @@ type StreamCipher struct {
 }
 
 func (ciph *StreamCipher) StreamConn(c net.Conn) net.Conn { return shadowstream.NewConn(c, ciph) }
-func (ciph *StreamCipher) PacketConn(c net.PacketConn) net.PacketConn {
+func (ciph *StreamCipher) PacketConn(c N.EnhancePacketConn) N.EnhancePacketConn {
 	return shadowstream.NewPacketConn(c, ciph)
 }
 
@@ -146,8 +168,8 @@ func (ciph *StreamCipher) PacketConn(c net.PacketConn) net.PacketConn {
 
 type dummy struct{}
 
-func (dummy) StreamConn(c net.Conn) net.Conn             { return c }
-func (dummy) PacketConn(c net.PacketConn) net.PacketConn { return c }
+func (dummy) StreamConn(c net.Conn) net.Conn                       { return c }
+func (dummy) PacketConn(c N.EnhancePacketConn) N.EnhancePacketConn { return c }
 
 // key-derivation function from original Shadowsocks
 func Kdf(password string, keyLen int) []byte {

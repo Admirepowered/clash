@@ -3,9 +3,10 @@ package dhcp
 import (
 	"context"
 	"net"
+	"net/netip"
 	"runtime"
 
-	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/metacubex/mihomo/component/dialer"
 )
 
 func ListenDHCPClient(ctx context.Context, ifaceName string) (net.PacketConn, error) {
@@ -24,5 +25,5 @@ func ListenDHCPClient(ctx context.Context, ifaceName string) (net.PacketConn, er
 		options = append(options, dialer.WithFallbackBind(true))
 	}
 
-	return dialer.ListenPacket(ctx, "udp4", listenAddr, options...)
+	return dialer.ListenPacket(ctx, "udp4", listenAddr, netip.AddrPortFrom(netip.AddrFrom4([4]byte{255, 255, 255, 255}), 67), options...)
 }

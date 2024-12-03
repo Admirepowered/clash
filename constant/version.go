@@ -1,6 +1,8 @@
 package constant
 
 var (
-	Version   = "unknown version"
-	BuildTime = "unknown time"
+	Meta       = true
+	Version    = "1.10.0"
+	BuildTime  = "unknown time"
+	MihomoName = "mihomo"
 )

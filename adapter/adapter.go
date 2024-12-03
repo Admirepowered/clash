@@ -2,29 +2,56 @@ package adapter
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/Dreamacro/clash/common/queue"
-	"github.com/Dreamacro/clash/component/dialer"
-	C "github.com/Dreamacro/clash/constant"
-
-	"go.uber.org/atomic"
+	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/queue"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/dialer"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
+	"github.com/puzpuzpuz/xsync/v3"
 )
+
+var UnifiedDelay = atomic.NewBool(false)
+
+const (
+	defaultHistoriesNum = 10
+)
+
+type internalProxyState struct {
+	alive   atomic.Bool
+	history *queue.Queue[C.DelayHistory]
+}
 
 type Proxy struct {
 	C.ProxyAdapter
-	history *queue.Queue
-	alive   *atomic.Bool
+	alive   atomic.Bool
+	history *queue.Queue[C.DelayHistory]
+	extra   *xsync.MapOf[string, *internalProxyState]
 }
 
-// Alive implements C.Proxy
-func (p *Proxy) Alive() bool {
+// Adapter implements C.Proxy
+func (p *Proxy) Adapter() C.ProxyAdapter {
+	return p.ProxyAdapter
+}
+
+// AliveForTestUrl implements C.Proxy
+func (p *Proxy) AliveForTestUrl(url string) bool {
+	if state, ok := p.extra.Load(url); ok {
+		return state.alive.Load()
+	}
+
 	return p.alive.Load()
 }
 
@@ -38,7 +65,6 @@ func (p *Proxy) Dial(metadata *C.Metadata) (C.Conn, error) {
 // DialContext implements C.ProxyAdapter
 func (p *Proxy) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.Conn, error) {
 	conn, err := p.ProxyAdapter.DialContext(ctx, metadata, opts...)
-	p.alive.Store(err == nil)
 	return conn, err
 }
 
@@ -52,35 +78,73 @@ func (p *Proxy) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 // ListenPacketContext implements C.ProxyAdapter
 func (p *Proxy) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
 	pc, err := p.ProxyAdapter.ListenPacketContext(ctx, metadata, opts...)
-	p.alive.Store(err == nil)
 	return pc, err
 }
 
 // DelayHistory implements C.Proxy
 func (p *Proxy) DelayHistory() []C.DelayHistory {
-	queue := p.history.Copy()
+	queueM := p.history.Copy()
 	histories := []C.DelayHistory{}
-	for _, item := range queue {
-		histories = append(histories, item.(C.DelayHistory))
+	for _, item := range queueM {
+		histories = append(histories, item)
 	}
 	return histories
 }
 
-// LastDelay return last history record. if proxy is not alive, return the max value of uint16.
+// DelayHistoryForTestUrl implements C.Proxy
+func (p *Proxy) DelayHistoryForTestUrl(url string) []C.DelayHistory {
+	var queueM []C.DelayHistory
+
+	if state, ok := p.extra.Load(url); ok {
+		queueM = state.history.Copy()
+	}
+	histories := []C.DelayHistory{}
+	for _, item := range queueM {
+		histories = append(histories, item)
+	}
+	return histories
+}
+
+// ExtraDelayHistories return all delay histories for each test URL
 // implements C.Proxy
-func (p *Proxy) LastDelay() (delay uint16) {
-	var max uint16 = 0xffff
-	if !p.alive.Load() {
-		return max
+func (p *Proxy) ExtraDelayHistories() map[string]C.ProxyState {
+	histories := map[string]C.ProxyState{}
+
+	p.extra.Range(func(k string, v *internalProxyState) bool {
+		testUrl := k
+		state := v
+
+		queueM := state.history.Copy()
+		var history []C.DelayHistory
+
+		for _, item := range queueM {
+			history = append(history, item)
+		}
+
+		histories[testUrl] = C.ProxyState{
+			Alive:   state.alive.Load(),
+			History: history,
+		}
+		return true
+	})
+	return histories
+}
+
+// LastDelayForTestUrl return last history record of the specified URL. if proxy is not alive, return the max value of uint16.
+// implements C.Proxy
+func (p *Proxy) LastDelayForTestUrl(url string) (delay uint16) {
+	var maxDelay uint16 = 0xffff
+
+	alive := false
+	var history C.DelayHistory
+
+	if state, ok := p.extra.Load(url); ok {
+		alive = state.alive.Load()
+		history = state.history.Last()
 	}
 
-	last := p.history.Last()
-	if last == nil {
-		return max
-	}
-	history := last.(C.DelayHistory)
-	if history.Delay == 0 {
-		return max
+	if !alive || history.Delay == 0 {
+		return maxDelay
 	}
 	return history.Delay
 }
@@ -93,29 +157,58 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 	}
 
 	mapping := map[string]any{}
-	json.Unmarshal(inner, &mapping)
+	_ = json.Unmarshal(inner, &mapping)
 	mapping["history"] = p.DelayHistory()
-	mapping["alive"] = p.Alive()
+	mapping["extra"] = p.ExtraDelayHistories()
+	mapping["alive"] = p.alive.Load()
 	mapping["name"] = p.Name()
 	mapping["udp"] = p.SupportUDP()
+	mapping["xudp"] = p.SupportXUDP()
+	mapping["tfo"] = p.SupportTFO()
 	return json.Marshal(mapping)
 }
 
 // URLTest get the delay for the specified URL
 // implements C.Proxy
-func (p *Proxy) URLTest(ctx context.Context, url string) (delay, meanDelay uint16, err error) {
+func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
+	var satisfied bool
+
 	defer func() {
-		p.alive.Store(err == nil)
+		alive := err == nil
 		record := C.DelayHistory{Time: time.Now()}
-		if err == nil {
-			record.Delay = delay
-			record.MeanDelay = meanDelay
+		if alive {
+			record.Delay = t
 		}
+
+		p.alive.Store(alive)
 		p.history.Put(record)
-		if p.history.Len() > 10 {
+		if p.history.Len() > defaultHistoriesNum {
 			p.history.Pop()
 		}
+
+		state, ok := p.extra.Load(url)
+		if !ok {
+			state = &internalProxyState{
+				history: queue.New[C.DelayHistory](defaultHistoriesNum),
+				alive:   atomic.NewBool(true),
+			}
+			p.extra.Store(url, state)
+		}
+
+		if !satisfied {
+			record.Delay = 0
+			alive = false
+		}
+
+		state.alive.Store(alive)
+		state.history.Put(record)
+		if state.history.Len() > defaultHistoriesNum {
+			state.history.Pop()
+		}
+
 	}()
+
+	unifiedDelay := UnifiedDelay.Load()
 
 	addr, err := urlToMetadata(url)
 	if err != nil {
@@ -127,7 +220,9 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (delay, meanDelay uint1
 	if err != nil {
 		return
 	}
-	defer instance.Close()
+	defer func() {
+		_ = instance.Close()
+	}()
 
 	req, err := http.NewRequest(http.MethodHead, url, nil)
 	if err != nil {
@@ -136,7 +231,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (delay, meanDelay uint1
 	req = req.WithContext(ctx)
 
 	transport := &http.Transport{
-		Dial: func(string, string) (net.Conn, error) {
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
 			return instance, nil
 		},
 		// from http.DefaultTransport
@@ -144,36 +239,54 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (delay, meanDelay uint1
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig:       ca.GetGlobalTLSConfig(&tls.Config{}),
 	}
 
 	client := http.Client{
+		Timeout:   30 * time.Second,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+
 	defer client.CloseIdleConnections()
 
 	resp, err := client.Do(req)
+
 	if err != nil {
 		return
 	}
-	resp.Body.Close()
-	delay = uint16(time.Since(start) / time.Millisecond)
 
-	resp, err = client.Do(req)
-	if err != nil {
-		// ignore error because some server will hijack the connection and close immediately
-		return delay, 0, nil
+	_ = resp.Body.Close()
+
+	if unifiedDelay {
+		second := time.Now()
+		var ignoredErr error
+		var secondResp *http.Response
+		secondResp, ignoredErr = client.Do(req)
+		if ignoredErr == nil {
+			resp = secondResp
+			_ = resp.Body.Close()
+			start = second
+		} else {
+			if strings.HasPrefix(url, "http://") {
+				log.Errorln("%s failed to get the second response from %s: %v", p.Name(), url, ignoredErr)
+				log.Warnln("It is recommended to use HTTPS for provider.health-check.url and group.url to ensure better reliability. Due to some proxy providers hijacking test addresses and not being compatible with repeated HEAD requests, using HTTP may result in failed tests.")
+			}
+		}
 	}
-	resp.Body.Close()
-	meanDelay = uint16(time.Since(start) / time.Millisecond / 2)
 
+	satisfied = resp != nil && (expectedStatus == nil || expectedStatus.Check(uint16(resp.StatusCode)))
+	t = uint16(time.Since(start) / time.Millisecond)
 	return
 }
-
 func NewProxy(adapter C.ProxyAdapter) *Proxy {
-	return &Proxy{adapter, queue.New(10), atomic.NewBool(true)}
+	return &Proxy{
+		ProxyAdapter: adapter,
+		history:      queue.New[C.DelayHistory](defaultHistoriesNum),
+		alive:        atomic.NewBool(true),
+		extra:        xsync.NewMapOf[string, *internalProxyState]()}
 }
 
 func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
@@ -194,13 +307,15 @@ func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
 			return
 		}
 	}
-
-	p, _ := strconv.ParseUint(port, 10, 16)
+	uintPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return
+	}
 
 	addr = C.Metadata{
 		Host:    u.Hostname(),
-		DstIP:   nil,
-		DstPort: C.Port(p),
+		DstIP:   netip.Addr{},
+		DstPort: uint16(uintPort),
 	}
 	return
 }

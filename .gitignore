@@ -23,14 +23,6 @@ vendor
 
 # test suite
 test/config/cache*
-
-# docs site generator
-node_modules
-package-lock.json
-pnpm-lock.yaml
-
-# docs site cache
-docs/.vitepress/cache
-
-# docs site build files
-docs/.vitepress/dist
+/output
+.vscode/
+.fleet/

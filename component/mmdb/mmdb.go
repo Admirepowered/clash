@@ -3,43 +3,94 @@ package mmdb
 import (
 	"sync"
 
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/log"
+	mihomoOnce "github.com/metacubex/mihomo/common/once"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 
-	"github.com/oschwald/geoip2-golang"
+	"github.com/oschwald/maxminddb-golang"
+)
+
+type databaseType = uint8
+
+const (
+	typeMaxmind databaseType = iota
+	typeSing
+	typeMetaV0
 )
 
 var (
-	mmdb *geoip2.Reader
-	once sync.Once
+	ipReader  IPReader
+	asnReader ASNReader
+	ipOnce    sync.Once
+	asnOnce   sync.Once
 )
 
 func LoadFromBytes(buffer []byte) {
-	once.Do(func() {
-		var err error
-		mmdb, err = geoip2.FromBytes(buffer)
+	ipOnce.Do(func() {
+		mmdb, err := maxminddb.FromBytes(buffer)
 		if err != nil {
 			log.Fatalln("Can't load mmdb: %s", err.Error())
+		}
+		ipReader = IPReader{Reader: mmdb}
+		switch mmdb.Metadata.DatabaseType {
+		case "sing-geoip":
+			ipReader.databaseType = typeSing
+		case "Meta-geoip0":
+			ipReader.databaseType = typeMetaV0
+		default:
+			ipReader.databaseType = typeMaxmind
 		}
 	})
 }
 
-func Verify() bool {
-	instance, err := geoip2.Open(C.Path.MMDB())
+func Verify(path string) bool {
+	instance, err := maxminddb.Open(path)
 	if err == nil {
 		instance.Close()
 	}
 	return err == nil
 }
 
-func Instance() *geoip2.Reader {
-	once.Do(func() {
-		var err error
-		mmdb, err = geoip2.Open(C.Path.MMDB())
+func IPInstance() IPReader {
+	ipOnce.Do(func() {
+		mmdbPath := C.Path.MMDB()
+		log.Infoln("Load MMDB file: %s", mmdbPath)
+		mmdb, err := maxminddb.Open(mmdbPath)
 		if err != nil {
-			log.Fatalln("Can't load mmdb: %s", err.Error())
+			log.Fatalln("Can't load MMDB: %s", err.Error())
+		}
+		ipReader = IPReader{Reader: mmdb}
+		switch mmdb.Metadata.DatabaseType {
+		case "sing-geoip":
+			ipReader.databaseType = typeSing
+		case "Meta-geoip0":
+			ipReader.databaseType = typeMetaV0
+		default:
+			ipReader.databaseType = typeMaxmind
 		}
 	})
 
-	return mmdb
+	return ipReader
+}
+
+func ASNInstance() ASNReader {
+	asnOnce.Do(func() {
+		ASNPath := C.Path.ASN()
+		log.Infoln("Load ASN file: %s", ASNPath)
+		asn, err := maxminddb.Open(ASNPath)
+		if err != nil {
+			log.Fatalln("Can't load ASN: %s", err.Error())
+		}
+		asnReader = ASNReader{Reader: asn}
+	})
+
+	return asnReader
+}
+
+func ReloadIP() {
+	mihomoOnce.Reset(&ipOnce)
+}
+
+func ReloadASN() {
+	mihomoOnce.Reset(&asnOnce)
 }

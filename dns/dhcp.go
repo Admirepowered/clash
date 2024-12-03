@@ -1,16 +1,15 @@
 package dns
 
 import (
-	"bytes"
 	"context"
 	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/component/dhcp"
-	"github.com/Dreamacro/clash/component/iface"
-	"github.com/Dreamacro/clash/component/resolver"
-
+	"github.com/metacubex/mihomo/component/dhcp"
+	"github.com/metacubex/mihomo/component/iface"
 	D "github.com/miekg/dns"
 )
 
@@ -27,17 +26,21 @@ type dhcpClient struct {
 	ifaceInvalidate time.Time
 	dnsInvalidate   time.Time
 
-	ifaceAddr *net.IPNet
+	ifaceAddr netip.Prefix
 	done      chan struct{}
 	clients   []dnsClient
 	err       error
 }
 
-func (d *dhcpClient) Exchange(m *D.Msg) (msg *D.Msg, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
-	defer cancel()
+var _ dnsClient = (*dhcpClient)(nil)
 
-	return d.ExchangeContext(ctx, m)
+// Address implements dnsClient
+func (d *dhcpClient) Address() string {
+	addrs := make([]string, 0)
+	for _, c := range d.clients {
+		addrs = append(addrs, c.Address())
+	}
+	return strings.Join(addrs, ",")
 }
 
 func (d *dhcpClient) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
@@ -46,7 +49,14 @@ func (d *dhcpClient) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg,
 		return nil, err
 	}
 
-	return batchExchange(ctx, clients, m)
+	msg, _, err = batchExchange(ctx, clients, m)
+	return
+}
+
+func (d *dhcpClient) ResetConnection() {
+	for _, client := range d.clients {
+		client.ResetConnection()
+	}
 }
 
 func (d *dhcpClient) resolve(ctx context.Context) ([]dnsClient, error) {
@@ -126,12 +136,12 @@ func (d *dhcpClient) invalidate() (bool, error) {
 		return false, err
 	}
 
-	addr, err := ifaceObj.PickIPv4Addr(nil)
+	addr, err := ifaceObj.PickIPv4Addr(netip.Addr{})
 	if err != nil {
 		return false, err
 	}
 
-	if time.Now().Before(d.dnsInvalidate) && d.ifaceAddr.IP.Equal(addr.IP) && bytes.Equal(d.ifaceAddr.Mask, addr.Mask) {
+	if time.Now().Before(d.dnsInvalidate) && d.ifaceAddr == addr {
 		return false, nil
 	}
 

@@ -4,20 +4,25 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Dreamacro/clash/common/observable"
+	"github.com/metacubex/mihomo/common/observable"
 
 	log "github.com/sirupsen/logrus"
 )
 
 var (
-	logCh  = make(chan any)
-	source = observable.NewObservable(logCh)
+	logCh  = make(chan Event)
+	source = observable.NewObservable[Event](logCh)
 	level  = INFO
 )
 
 func init() {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.DebugLevel)
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp:             true,
+		TimestampFormat:           "2006-01-02T15:04:05.999999999Z07:00",
+		EnvironmentOverrideColors: true,
+	})
 }
 
 type Event struct {
@@ -57,12 +62,12 @@ func Fatalln(format string, v ...any) {
 	log.Fatalf(format, v...)
 }
 
-func Subscribe() observable.Subscription {
+func Subscribe() observable.Subscription[Event] {
 	sub, _ := source.Subscribe()
 	return sub
 }
 
-func UnSubscribe(sub observable.Subscription) {
+func UnSubscribe(sub observable.Subscription[Event]) {
 	source.UnSubscribe(sub)
 }
 
@@ -88,8 +93,6 @@ func print(data Event) {
 		log.Errorln(data.Payload)
 	case DEBUG:
 		log.Debugln(data.Payload)
-	case SILENT:
-		return
 	}
 }
 

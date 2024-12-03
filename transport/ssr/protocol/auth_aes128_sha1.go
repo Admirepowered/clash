@@ -5,14 +5,16 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"math"
-	mathRand "math/rand"
 	"net"
 	"strconv"
 	"strings"
 
-	"github.com/Dreamacro/clash/common/pool"
-	"github.com/Dreamacro/clash/log"
-	"github.com/Dreamacro/clash/transport/ssr/tools"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/pool"
+	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/transport/ssr/tools"
+
+	"github.com/metacubex/randv2"
 )
 
 type (
@@ -82,13 +84,13 @@ func (a *authAES128) StreamConn(c net.Conn, iv []byte) net.Conn {
 	return &Conn{Conn: c, Protocol: p}
 }
 
-func (a *authAES128) PacketConn(c net.PacketConn) net.PacketConn {
+func (a *authAES128) PacketConn(c N.EnhancePacketConn) N.EnhancePacketConn {
 	p := &authAES128{
 		Base:               a.Base,
 		authAES128Function: a.authAES128Function,
 		userData:           a.userData,
 	}
-	return &PacketConn{PacketConn: c, Protocol: p}
+	return &PacketConn{EnhancePacketConn: c, Protocol: p}
 }
 
 func (a *authAES128) Decode(dst, src *bytes.Buffer) error {
@@ -199,7 +201,7 @@ func (a *authAES128) packData(poolBuf *bytes.Buffer, data []byte, fullDataLength
 }
 
 func trapezoidRandom(max int, d float64) int {
-	base := mathRand.Float64()
+	base := randv2.Float64()
 	if d-0 > 1e-6 {
 		a := 1 - d
 		base = (math.Sqrt(a*a+4*d*base) - a) / (2 * d)
@@ -220,10 +222,10 @@ func (a *authAES128) getRandDataLengthForPackData(dataLength, fullDataLength int
 		if revLength > -1460 {
 			return trapezoidRandom(revLength+1460, -0.3)
 		}
-		return mathRand.Intn(32)
+		return randv2.IntN(32)
 	}
 	if dataLength > 900 {
-		return mathRand.Intn(revLength)
+		return randv2.IntN(revLength)
 	}
 	return trapezoidRandom(revLength, -0.3)
 }
@@ -248,7 +250,7 @@ func (a *authAES128) packAuthData(poolBuf *bytes.Buffer, data []byte) {
 	copy(macKey, a.iv)
 	copy(macKey[len(a.iv):], a.Key)
 
-	poolBuf.WriteByte(byte(mathRand.Intn(256)))
+	poolBuf.WriteByte(byte(randv2.IntN(256)))
 	poolBuf.Write(a.hmac(macKey, poolBuf.Bytes())[:6])
 	poolBuf.Write(a.userID[:])
 	err := a.authData.putEncryptedData(poolBuf, a.userKey, [2]int{packedAuthDataLength, randDataLength}, a.salt)
@@ -264,9 +266,9 @@ func (a *authAES128) packAuthData(poolBuf *bytes.Buffer, data []byte) {
 
 func (a *authAES128) getRandDataLengthForPackAuthData(size int) int {
 	if size > 400 {
-		return mathRand.Intn(512)
+		return randv2.IntN(512)
 	}
-	return mathRand.Intn(1024)
+	return randv2.IntN(1024)
 }
 
 func (a *authAES128) packRandData(poolBuf *bytes.Buffer, size int) {

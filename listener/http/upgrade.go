@@ -1,14 +1,16 @@
 package http
 
 import (
+	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"strings"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	N "github.com/Dreamacro/clash/common/net"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/socks5"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	N "github.com/metacubex/mihomo/common/net"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/socks5"
 )
 
 func isUpgradeRequest(req *http.Request) bool {
@@ -23,7 +25,7 @@ func isUpgradeRequest(req *http.Request) bool {
 	return false
 }
 
-func handleUpgrade(conn net.Conn, request *http.Request, in chan<- C.ConnContext) {
+func handleUpgrade(conn net.Conn, request *http.Request, tunnel C.Tunnel, additions ...inbound.Addition) {
 	defer conn.Close()
 
 	removeProxyHeaders(request.Header)
@@ -39,12 +41,30 @@ func handleUpgrade(conn net.Conn, request *http.Request, in chan<- C.ConnContext
 		return
 	}
 
-	left, right := net.Pipe()
+	left, right := N.Pipe()
 
-	in <- inbound.NewHTTP(dstAddr, conn.RemoteAddr(), conn.LocalAddr(), right)
+	go tunnel.HandleTCPConn(inbound.NewHTTP(dstAddr, conn, right, additions...))
 
-	bufferedLeft := N.NewBufferedConn(left)
-	defer bufferedLeft.Close()
+	var bufferedLeft *N.BufferedConn
+	if request.TLS != nil {
+		tlsConn := tls.Client(left, &tls.Config{
+			ServerName: request.URL.Hostname(),
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
+		defer cancel()
+		if tlsConn.HandshakeContext(ctx) != nil {
+			_ = left.Close()
+			return
+		}
+
+		bufferedLeft = N.NewBufferedConn(tlsConn)
+	} else {
+		bufferedLeft = N.NewBufferedConn(left)
+	}
+	defer func() {
+		_ = bufferedLeft.Close()
+	}()
 
 	err := request.Write(bufferedLeft)
 	if err != nil {

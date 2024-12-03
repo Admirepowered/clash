@@ -5,18 +5,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/component/profile"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/component/profile"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 
-	"go.etcd.io/bbolt"
+	"github.com/metacubex/bbolt"
 )
 
 var (
-	fileMode os.FileMode = 0o666
+	initOnce     sync.Once
+	fileMode     os.FileMode = 0o666
+	defaultCache *CacheFile
 
-	bucketSelected = []byte("selected")
-	bucketFakeip   = []byte("fakeip")
+	bucketSelected         = []byte("selected")
+	bucketFakeip           = []byte("fakeip")
+	bucketETag             = []byte("etag")
+	bucketSubscriptionInfo = []byte("subscriptioninfo")
 )
 
 // CacheFile store and update the cache file
@@ -67,75 +71,11 @@ func (c *CacheFile) SelectedMap() map[string]string {
 	return mapping
 }
 
-func (c *CacheFile) PutFakeip(key, value []byte) error {
-	if c.DB == nil {
-		return nil
-	}
-
-	err := c.DB.Batch(func(t *bbolt.Tx) error {
-		bucket, err := t.CreateBucketIfNotExists(bucketFakeip)
-		if err != nil {
-			return err
-		}
-		return bucket.Put(key, value)
-	})
-	if err != nil {
-		log.Warnln("[CacheFile] write cache to %s failed: %s", c.DB.Path(), err.Error())
-	}
-
-	return err
-}
-
-func (c *CacheFile) DelFakeipPair(ip, host []byte) error {
-	if c.DB == nil {
-		return nil
-	}
-
-	err := c.DB.Batch(func(t *bbolt.Tx) error {
-		bucket, err := t.CreateBucketIfNotExists(bucketFakeip)
-		if err != nil {
-			return err
-		}
-		err = bucket.Delete(ip)
-		if len(host) > 0 {
-			if err := bucket.Delete(host); err != nil {
-				return err
-			}
-		}
-		return err
-	})
-	if err != nil {
-		log.Warnln("[CacheFile] write cache to %s failed: %s", c.DB.Path(), err.Error())
-	}
-
-	return err
-}
-
-func (c *CacheFile) GetFakeip(key []byte) []byte {
-	if c.DB == nil {
-		return nil
-	}
-
-	tx, err := c.DB.Begin(false)
-	if err != nil {
-		return nil
-	}
-	defer tx.Rollback()
-
-	bucket := tx.Bucket(bucketFakeip)
-	if bucket == nil {
-		return nil
-	}
-
-	return bucket.Get(key)
-}
-
 func (c *CacheFile) Close() error {
 	return c.DB.Close()
 }
 
-// Cache return singleton of CacheFile
-var Cache = sync.OnceValue(func() *CacheFile {
+func initCache() {
 	options := bbolt.Options{Timeout: time.Second}
 	db, err := bbolt.Open(C.Path.Cache(), fileMode, &options)
 	switch err {
@@ -151,7 +91,14 @@ var Cache = sync.OnceValue(func() *CacheFile {
 		log.Warnln("[CacheFile] can't open cache file: %s", err.Error())
 	}
 
-	return &CacheFile{
+	defaultCache = &CacheFile{
 		DB: db,
 	}
-})
+}
+
+// Cache return singleton of CacheFile
+func Cache() *CacheFile {
+	initOnce.Do(initCache)
+
+	return defaultCache
+}

@@ -6,15 +6,17 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/Dreamacro/clash/common/structure"
-	"github.com/Dreamacro/clash/component/dialer"
-	C "github.com/Dreamacro/clash/constant"
-	obfs "github.com/Dreamacro/clash/transport/simple-obfs"
-	"github.com/Dreamacro/clash/transport/snell"
+	"github.com/metacubex/mihomo/common/structure"
+	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/proxydialer"
+	C "github.com/metacubex/mihomo/constant"
+	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
+	"github.com/metacubex/mihomo/transport/snell"
 )
 
 type Snell struct {
 	*Base
+	option     *SnellOption
 	psk        []byte
 	pool       *snell.Pool
 	obfsOption *simpleObfsOption
@@ -50,9 +52,13 @@ func streamConn(c net.Conn, option streamOption) *snell.Snell {
 	return snell.StreamConn(c, option.psk, option.version)
 }
 
-// StreamConn implements C.ProxyAdapter
-func (s *Snell) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+// StreamConnContext implements C.ProxyAdapter
+func (s *Snell) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	c = streamConn(c, streamOption{s.psk, s.version, s.addr, s.obfsOption})
+	if metadata.NetWork == C.UDP {
+		err := snell.WriteUDPHeader(c, s.version)
+		return c, err
+	}
 	err := snell.WriteHeader(c, metadata.String(), uint(metadata.DstPort), s.version)
 	return c, err
 }
@@ -72,27 +78,48 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata, opts ...d
 		return NewConn(c, s), err
 	}
 
-	c, err := dialer.DialContext(ctx, "tcp", s.addr, s.Base.DialOptions(opts...)...)
+	return s.DialContextWithDialer(ctx, dialer.NewDialer(s.Base.DialOptions(opts...)...), metadata)
+}
+
+// DialContextWithDialer implements C.ProxyAdapter
+func (s *Snell) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (_ C.Conn, err error) {
+	if len(s.option.DialerProxy) > 0 {
+		dialer, err = proxydialer.NewByName(s.option.DialerProxy, dialer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	c, err := dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", s.addr, err)
 	}
-	tcpKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
 
-	c, err = s.StreamConn(c, metadata)
+	c, err = s.StreamConnContext(ctx, c, metadata)
 	return NewConn(c, s), err
 }
 
 // ListenPacketContext implements C.ProxyAdapter
 func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
-	c, err := dialer.DialContext(ctx, "tcp", s.addr, s.Base.DialOptions(opts...)...)
+	return s.ListenPacketWithDialer(ctx, dialer.NewDialer(s.Base.DialOptions(opts...)...), metadata)
+}
+
+// ListenPacketWithDialer implements C.ProxyAdapter
+func (s *Snell) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (C.PacketConn, error) {
+	var err error
+	if len(s.option.DialerProxy) > 0 {
+		dialer, err = proxydialer.NewByName(s.option.DialerProxy, dialer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	c, err := dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, err
 	}
-	tcpKeepAlive(c)
 	c = streamConn(c, streamOption{s.psk, s.version, s.addr, s.obfsOption})
 
 	err = snell.WriteUDPHeader(c, s.version)
@@ -102,6 +129,16 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata, o
 
 	pc := snell.PacketConn(c)
 	return newPacketConn(pc, s), nil
+}
+
+// SupportWithDialer implements C.ProxyAdapter
+func (s *Snell) SupportWithDialer() C.NetWork {
+	return C.ALLNet
+}
+
+// SupportUOT implements C.ProxyAdapter
+func (s *Snell) SupportUOT() bool {
+	return true
 }
 
 func NewSnell(option SnellOption) (*Snell, error) {
@@ -137,13 +174,17 @@ func NewSnell(option SnellOption) (*Snell, error) {
 
 	s := &Snell{
 		Base: &Base{
-			name:  option.Name,
-			addr:  addr,
-			tp:    C.Snell,
-			udp:   option.UDP,
-			iface: option.Interface,
-			rmark: option.RoutingMark,
+			name:   option.Name,
+			addr:   addr,
+			tp:     C.Snell,
+			udp:    option.UDP,
+			tfo:    option.TFO,
+			mpTcp:  option.MPTCP,
+			iface:  option.Interface,
+			rmark:  option.RoutingMark,
+			prefer: C.NewDNSPrefer(option.IPVersion),
 		},
+		option:     &option,
 		psk:        psk,
 		obfsOption: obfsOption,
 		version:    option.Version,
@@ -151,12 +192,19 @@ func NewSnell(option SnellOption) (*Snell, error) {
 
 	if option.Version == snell.Version2 {
 		s.pool = snell.NewPool(func(ctx context.Context) (*snell.Snell, error) {
-			c, err := dialer.DialContext(ctx, "tcp", addr, s.Base.DialOptions()...)
+			var err error
+			var cDialer C.Dialer = dialer.NewDialer(s.Base.DialOptions()...)
+			if len(s.option.DialerProxy) > 0 {
+				cDialer, err = proxydialer.NewByName(s.option.DialerProxy, cDialer)
+				if err != nil {
+					return nil, err
+				}
+			}
+			c, err := cDialer.DialContext(ctx, "tcp", addr)
 			if err != nil {
 				return nil, err
 			}
-
-			tcpKeepAlive(c)
+			
 			return streamConn(c, streamOption{psk, option.Version, addr, obfsOption}), nil
 		})
 	}
