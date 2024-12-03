@@ -2,8 +2,6 @@ package config
 
 import (
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 
 	"github.com/Dreamacro/clash/component/mmdb"
@@ -12,20 +10,19 @@ import (
 )
 
 func downloadMMDB(path string) (err error) {
-	resp, err := http.Get("https://cdn.jsdelivr.net/gh/Dreamacro/maxmind-geoip@release/Country.mmdb")
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	url := "https://github.com/Dreamacro/maxmind-geoip/releases/latest/download/Country.mmdb"
+	response, err := makeRequest(url, "GET", "", nil)
 	if err != nil {
+		log.Infoln("Failed to request:%s", err)
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-
-	return err
+	err = os.WriteFile(path, []byte(response), 0644)
+	if err != nil {
+		log.Infoln("Failed to write file:%s", err)
+		return
+	}
+	return
 }
 
 func initMMDB() error {
