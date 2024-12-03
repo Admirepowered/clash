@@ -1,16 +1,11 @@
 package geodata
 
 import (
-	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
-	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	"github.com/metacubex/mihomo/component/mmdb"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -68,22 +63,18 @@ func SetASNUrl(url string) {
 }
 
 func downloadToPath(url string, path string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
-	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, url, http.MethodGet, nil, nil)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	response, err := makeRequest(url, "GET", "", nil)
 	if err != nil {
+		log.Infoln("Failed to request:%s", err)
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-
-	return err
+	err = os.WriteFile(path, []byte(response), 0644)
+	if err != nil {
+		log.Infoln("Failed to write file:%s", err)
+		return
+	}
+	return
 }
 
 func InitGeoSite() error {
