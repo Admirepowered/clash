@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/log"
 )
 
 func createTLSConfig() *tls.Config {
